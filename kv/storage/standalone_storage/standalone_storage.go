@@ -13,13 +13,11 @@ import (
 // StandAloneStorage is an implementation of `Storage` for a single-node TinyKV instance. It does not
 // communicate with other nodes and all data is stored locally.
 type StandAloneStorage struct {
-	// Your Data Here (1).
 	engine *engine_util.Engines
 	conf   *config.Config
 }
 
 func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
-	// Your Code Here (1).
 	dbPath := conf.DBPath
 	kvPath := path.Join(dbPath, "kv")
 	raftPath := path.Join(dbPath, "raft")
@@ -33,17 +31,14 @@ func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
 }
 
 func (s *StandAloneStorage) Start() error {
-	// Your Code Here (1).
 	return nil
 }
 
 func (s *StandAloneStorage) Stop() error {
-	// Your Code Here (1).
 	return s.engine.Close()
 }
 
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
-	// Your Code Here (1).
 	txn := s.engine.Kv.NewTransaction(false)
 	return NewStandAloneStorageReader(txn), nil
 }
@@ -75,7 +70,6 @@ func (s *StandAloneStorageReader) Close() {
 }
 
 func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
-	// Your Code Here (1).
 	var err error
 	for _, m := range batch {
 		key, val, cf := m.Key(), m.Value(), m.Cf()
