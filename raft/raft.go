@@ -157,6 +157,8 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	randomElectionTimeout int
 }
 
 // newRaft return a raft peer with the given config
@@ -183,22 +185,92 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	switch r.State {
+	case StateLeader:
+		r.leaderTick()
+	case StateCandidate:
+		r.candidateTick()
+	case StateFollower:
+		r.followerTick()
+	}
+}
+
+func (r *Raft) leaderTick() {
+	r.heartbeatElapsed++
+	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		// MessageType_MsgBeat 属于内部消息，不需要经过 RawNode 处理
+		r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgBeat})
+	}
+	//TODO 选举超时 判断心跳回应数量
+
+	//TODO 3A 禅让机制
+}
+func (r *Raft) candidateTick() {
+	r.electionElapsed++
+	// 选举超时 发起选举
+	if r.electionElapsed >= r.randomElectionTimeout {
+		r.electionElapsed = 0
+		// MessageType_MsgHup 属于内部消息，也不需要经过 RawNode 处理
+		r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
+	}
+}
+func (r *Raft) followerTick() {
+	r.electionElapsed++
+	// 选举超时 发起选举
+	if r.electionElapsed >= r.randomElectionTimeout {
+		r.electionElapsed = 0
+		// MessageType_MsgHup 属于内部消息，也不需要经过 RawNode 处理
+		r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgHup})
+	}
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+
+	if term > r.Term {
+		// 只有 Term > currentTerm 的时候才需要对 Vote 进行重置
+		// 这样可以保证在一个任期内只会进行一次投票
+		r.Vote = None
+	}
+	r.Term = term
+	r.State = StateFollower
+	r.Lead = lead
+	r.electionElapsed = 0
+	r.leadTransferee = None
+	r.resetRandomizedElectionTimeout()
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.State = StateCandidate // 0. 更改自己的状态
+	r.Term++                 // 1. 增加自己的任期
+	r.Vote = r.id            // 2. 投票给自己
+	r.votes[r.id] = true
+
+	r.electionElapsed = 0 // 3. 重置超时选举计时器
+	r.resetRandomizedElectionTimeout()
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	//领导者应在其任期内提出noop条目
+	r.State = StateLeader
+	r.Lead = r.id
+	//初始化 nextIndex 和 matchIndex
+	for id := range r.Prs {
+		r.Prs[id].Next = r.RaftLog.LastIndex() + 1 // 初始化为 leader 的最后一条日志索引（后续出现冲突会往前移动）
+		r.Prs[id].Match = 0                        // 初始化为 0 就可以了
+	}
+	//3A
+	r.PendingConfIndex = r.initPendingConfIndex()
+	// 成为 Leader 之后立马在日志中追加一条 noop 日志，这是因为
+	// 在 Raft 论文中提交 Leader 永远不会通过计算副本的方式提交一个之前任期、并且已经被复制到大多数节点的日志
+	// 通过追加一条当前任期的 noop 日志，可以快速的提交之前任期内所有被复制到大多数节点的日志
+	r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -207,10 +279,183 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	switch r.State {
 	case StateFollower:
+		//Follower 可以接收到的消息：
+		//MsgHup、MsgRequestVote、MsgHeartBeat、MsgAppendEntry
+		r.followerStep(m)
 	case StateCandidate:
+		//Candidate 可以接收到的消息：
+		//MsgHup、MsgRequestVote、MsgRequestVoteResponse、MsgHeartBeat
+		r.candidateStep(m)
 	case StateLeader:
+		//Leader 可以接收到的消息：
+		//MsgBeat、MsgHeartBeatResponse、MsgRequestVote
+		r.leaderStep(m)
 	}
 	return nil
+}
+func (r *Raft) followerStep(m pb.Message) {
+	//Follower 可以接收到的消息：
+	//MsgHup、MsgRequestVote、MsgHeartBeat、MsgAppendEntry
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		//Local Msg，用于请求节点开始选举，仅仅需要一个字段。
+		//TODO MsgHup
+		// 成为候选者，开始发起投票
+		r.handleStartElection(m)
+	case pb.MessageType_MsgBeat:
+		//Local Msg，用于告知 Leader 该发送心跳了，仅仅需要一个字段。
+		//TODO Follower No processing required
+	case pb.MessageType_MsgPropose:
+		//Local Msg，用于上层请求 propose 条目
+		//TODO Follower No processing required
+	case pb.MessageType_MsgAppend:
+		//Common Msg，用于 Leader 给其他节点同步日志条目
+		//TODO MsgAppendEntry
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgAppendResponse:
+		//Common Msg，用于节点告诉 Leader 日志同步是否成功，和 MsgAppend 对应
+		//TODO Follower No processing required
+	case pb.MessageType_MsgRequestVote:
+		//Common Msg，用于 Candidate 请求投票
+		// TODO MsgRequestVote
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		//Common Msg，用于节点告诉 Candidate 投票结果
+		//TODO Follower No processing required
+	case pb.MessageType_MsgSnapshot:
+		//Common Msg，用于 Leader 将快照发送给其他节点
+		r.handleSnapshot(m)
+	case pb.MessageType_MsgHeartbeat:
+		//Common Msg，即 Leader 发送的心跳。
+		//不同于论文中使用空的追加日志 RPC 代表心跳，TinyKV 给心跳一个单独的 MsgType
+		//TODO MsgHeartbeat
+		// 接收心跳包，重置超时，称为跟随者，回发心跳包的resp
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgHeartbeatResponse:
+		//Common Msg，即节点对心跳的回应
+		//TODO Follower No processing required
+	case pb.MessageType_MsgTransferLeader:
+		//Local Msg，用于上层请求转移 Leader
+		//TODO Follower No processing required
+		// 非 leader 收到领导权禅让消息，需要转发给 leader
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		//Local Msg，节点收到后清空 r.electionElapsed，并即刻发起选举
+		r.handleTimeoutNowRequest(m)
+	}
+}
+func (r *Raft) candidateStep(m pb.Message) {
+	//Candidate 可以接收到的消息：
+	//MsgHup、MsgRequestVote、MsgRequestVoteResponse、MsgHeartBeat
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		//Local Msg，用于请求节点开始选举，仅仅需要一个字段。
+		//TODO MsgHup
+		// 成为候选者，开始发起投票
+		r.handleStartElection(m)
+	case pb.MessageType_MsgBeat:
+		//Local Msg，用于告知 Leader 该发送心跳了，仅仅需要一个字段。
+		//TODO Candidate No processing required
+	case pb.MessageType_MsgPropose:
+		//Local Msg，用于上层请求 propose 条目
+		//TODO Candidate No processing required
+	case pb.MessageType_MsgAppend:
+		//Common Msg，用于 Leader 给其他节点同步日志条目
+		//TODO MsgAppendEntry
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgAppendResponse:
+		//Common Msg，用于节点告诉 Leader 日志同步是否成功，和 MsgAppend 对应
+		//TODO Candidate No processing required
+	case pb.MessageType_MsgRequestVote:
+		//Common Msg，用于 Candidate 请求投票
+		// TODO MsgRequestVote
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		//Common Msg，用于节点告诉 Candidate 投票结果
+		// TODO MsgRequestVoteResponse
+		r.handleRequestVoteResponse(m)
+	case pb.MessageType_MsgSnapshot:
+		//Common Msg，用于 Leader 将快照发送给其他节点
+		r.handleSnapshot(m)
+	case pb.MessageType_MsgHeartbeat:
+		//Common Msg，即 Leader 发送的心跳。
+		//不同于论文中使用空的追加日志 RPC 代表心跳，TinyKV 给心跳一个单独的 MsgType
+		//TODO MsgHeartbeat
+		// 接收心跳包，重置超时，称为跟随者，回发心跳包的resp
+		r.handleHeartbeat(m)
+	case pb.MessageType_MsgHeartbeatResponse:
+		//Common Msg，即节点对心跳的回应
+		//TODO Candidate No processing required
+	case pb.MessageType_MsgTransferLeader:
+		//Local Msg，用于上层请求转移 Leader
+		//要求领导转移其领导权
+		//TODO Candidate No processing required
+		// 非 leader 收到领导权禅让消息，需要转发给 leader
+		if r.Lead != None {
+			m.To = r.Lead
+			r.msgs = append(r.msgs, m)
+		}
+	case pb.MessageType_MsgTimeoutNow:
+		//Local Msg，节点收到后清空 r.electionElapsed，并即刻发起选举
+		//从领导发送到领导转移目标，以让传输目标立即超时并开始新的选择。
+		r.handleTimeoutNowRequest(m)
+	}
+}
+func (r *Raft) leaderStep(m pb.Message) {
+	//Leader 可以接收到的消息：
+	//MsgBeat、MsgHeartBeatResponse、MsgRequestVote、MsgPropose、MsgAppendResponse、MsgAppend
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		//Local Msg，用于请求节点开始选举，仅仅需要一个字段。
+		//TODO Leader No processing required
+	case pb.MessageType_MsgBeat:
+		//Local Msg，用于告知 Leader 该发送心跳了，仅仅需要一个字段。
+		//TODO MsgBeat
+		r.broadcastHeartBeat()
+	case pb.MessageType_MsgPropose:
+		//Local Msg，用于上层请求 propose 条目
+		//TODO MsgPropose
+		r.handlePropose(m)
+	case pb.MessageType_MsgAppend:
+		//Common Msg，用于 Leader 给其他节点同步日志条目
+		//TODO 网络分区的情况，也是要的
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgAppendResponse:
+		//Common Msg，用于节点告诉 Leader 日志同步是否成功，和 MsgAppend 对应
+		//TODO MsgAppendResponse
+		r.handleAppendEntriesResponse(m)
+	case pb.MessageType_MsgRequestVote:
+		//Common Msg，用于 Candidate 请求投票
+		// TODO MsgRequestVote
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		//Common Msg，用于节点告诉 Candidate 投票结果
+		//TODO Leader No processing required
+	case pb.MessageType_MsgSnapshot:
+		//Common Msg，用于 Leader 将快照发送给其他节点
+		//TODO Leader No processing required
+	case pb.MessageType_MsgHeartbeat:
+		//Common Msg，即 Leader 发送的心跳。
+		//不同于论文中使用空的追加日志 RPC 代表心跳，TinyKV 给心跳一个单独的 MsgType
+		//TODO Leader No processing required
+	case pb.MessageType_MsgHeartbeatResponse:
+		//Common Msg，即节点对心跳的回应
+		//TODO MsgHeartBeatResponse
+		r.handleHeartbeatResponse(m)
+	case pb.MessageType_MsgTransferLeader:
+		//Local Msg，用于上层请求转移 Leader
+		//要求领导转移其领导权
+		//TODO project3
+		r.handleTransferLeader(m)
+
+	case pb.MessageType_MsgTimeoutNow:
+		//Local Msg，节点收到后清空 r.electionElapsed，并即刻发起选举
+		//从领导发送到领导转移目标，以让传输目标立即超时并开始新的选择。
+		//TODO project3
+	}
 }
 
 // handleAppendEntries handle AppendEntries RPC request
