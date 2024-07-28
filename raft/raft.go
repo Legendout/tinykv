@@ -336,9 +336,6 @@ func (r *Raft) leaderTick() {
 	if r.leadTransferee != None {
 		// 在选举超时后领导权禅让仍然未完成，则 leader 应该终止领导权禅让，这样可以恢复客户端请求
 		r.transferElapsed++
-		if r.transferElapsed >= r.electionTimeout {
-			r.leadTransferee = None
-		}
 	}
 }
 
@@ -635,21 +632,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 	}
 	//1. 判断 Msg 的 Term 是否大于等于自己的 Term，是则更新
 	if m.Term > r.Term {
-		// term比自己大 变成follower
-		r.becomeFollower(m.Term, None)
-	}
-	if (m.Term > r.Term || m.Term == r.Term && (r.Vote == None || r.Vote == m.From)) && r.RaftLog.isUpToDate(m.Index, m.LogTerm) {
-		// 投票
-		// 1. Candidate 任期大于自己并且日志足够新
-		// 2. Candidate 任期和自己相等并且自己在当前任期内没有投过票或者已经投给了 Candidate，并且 Candidate 的日志足够新
-		r.becomeFollower(m.Term, None)
-		r.Vote = m.From
-	} else {
-		// 拒绝投票
-		// 1. Candidate 的任期小于自己
-		// 2. 自己在当前任期已经投过票了
-		// 3. Candidate 的日志不够新
-		voteRep.Reject = true
+		r.becomeFollower(m.Term, m.From)
 	}
 	r.msgs = append(r.msgs, voteRep)
 }
@@ -691,25 +674,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	prevLogTerm := m.LogTerm
 	r.becomeFollower(m.Term, m.From)
 	if prevLogIndex > r.RaftLog.LastIndex() || r.RaftLog.TermNoErr(prevLogIndex) != prevLogTerm {
-		//最后一条index和preLogIndex冲突、或者任期冲突
-		//这时不能直接将 leader 传递过来的 Entries 覆盖到 follower 日志上
-		//这里可以直接返回，以便让 leader 尝试 prevLogIndex - 1 这条日志
-		//但是这样 follower 和 leader 之间的同步比较慢
-		//TODO 日志冲突优化：
-		//	找到冲突任期的第一条日志，下次 leader 发送 AppendEntry 的时候会将 nextIndex 设置为 ConflictIndex
-		// 	如果找不到的话就设置为 prevLogIndex 的前一个
-		appendEntryResp.Index = r.RaftLog.LastIndex()
-		//appendEntryResp.Index = prevLogIndex - 1 // 用于提示 leader prevLogIndex 的开始位置是appendEntryResp.Index
-		if prevLogIndex <= r.RaftLog.LastIndex() {
-			conflictTerm := r.RaftLog.TermNoErr(prevLogIndex)
-			for _, ent := range r.RaftLog.entries {
-				if ent.Term == conflictTerm {
-					//找到冲突任期的上一个任期的idx位置
-					appendEntryResp.Index = ent.Index - 1
-					break
-				}
-			}
-		}
+		r.msgs = append(r.msgs, appendEntryResp)
+		return
 	} else {
 		//prevLogIndex没有冲突
 		if len(m.Entries) > 0 {
