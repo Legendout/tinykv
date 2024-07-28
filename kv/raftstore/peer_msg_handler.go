@@ -101,6 +101,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//5. 调用 d.RaftGroup.Advance() 推进 RawNode,更新 raft 状态
 	d.RaftGroup.Advance(ready)
 }
+
 func (d *peerMsgHandler) processCommittedEntry(entry *pb.Entry, kvWB *engine_util.WriteBatch) *engine_util.WriteBatch {
 	// 检查日志是否是配置变更日志
 	if entry.EntryType == pb.EntryType_EntryConfChange {
