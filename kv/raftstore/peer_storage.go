@@ -256,17 +256,14 @@ func (ps *PeerStorage) clearMeta(kvWB, raftWB *engine_util.WriteBatch) error {
 
 // Delete all data that is not covered by `new_region`.
 func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
-	// Your Code Here (2C).
-	// 1. 获取当前 region 的 startKey 和 endKey
-	startKey, endKey := ps.region.StartKey, ps.region.EndKey
-	// 2. 获取新 region 的 startKey 和 endKey
-	newStartKey, newEndKey := newRegion.StartKey, newRegion.EndKey
-	// 3. 判断新 region 是否和当前 region 一样，如果一样则不需要删除
-	if bytes.Equal(startKey, newStartKey) && bytes.Equal(endKey, newEndKey) {
-		return
+	oldStartKey, oldEndKey := ps.region.GetStartKey(), ps.region.GetEndKey()
+	newStartKey, newEndKey := newRegion.GetStartKey(), newRegion.GetEndKey()
+	if bytes.Compare(oldStartKey, newStartKey) < 0 {
+		ps.clearRange(newRegion.Id, oldStartKey, newStartKey)
 	}
-	// 4. 删除当前 region 的数据
-	ps.clearRange(ps.region.Id, startKey, endKey)
+	if bytes.Compare(newEndKey, oldEndKey) < 0 || (len(oldEndKey) == 0 && len(newEndKey) != 0) {
+		ps.clearRange(newRegion.Id, newEndKey, oldEndKey)
+	}
 }
 
 // ClearMeta delete stale metadata like raftState, applyState, regionState and raft log entries
