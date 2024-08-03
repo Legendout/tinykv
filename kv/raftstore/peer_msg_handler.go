@@ -143,32 +143,11 @@ func (d *peerMsgHandler) processAdminRequest(entry *pb.Entry, requests *raft_cmd
 
 // notifyHeartbeatScheduler 帮助 region 快速创建 peer
 func (d *peerMsgHandler) notifyHeartbeatScheduler(region *metapb.Region, peer *peer) {
-	clonedRegion := new(metapb.Region)
-	err := util.CloneMsg(region, clonedRegion)
-	if err != nil {
-		return
-	}
-	d.ctx.schedulerTaskSender <- &runner.SchedulerRegionHeartbeatTask{
-		Region:          clonedRegion,
-		Peer:            peer.Meta,
-		PendingPeers:    peer.CollectPendingPeers(),
-		ApproximateSize: peer.ApproximateSize,
-	}
+	return
 }
 
 func (d *peerMsgHandler) createNewSplitRegion(split *raft_cmdpb.SplitRequest, oldRegion *metapb.Region) *metapb.Region {
-	newPeers := make([]*metapb.Peer, 0)
-	for i, peer := range oldRegion.Peers {
-		newPeers = append(newPeers, &metapb.Peer{Id: split.NewPeerIds[i], StoreId: peer.StoreId})
-	}
-	newRegion := &metapb.Region{
-		Id:          split.NewRegionId,
-		StartKey:    split.SplitKey,
-		EndKey:      oldRegion.EndKey,
-		Peers:       newPeers, // Region 中每个 Peer 的 id 以及所在的 storeId
-		RegionEpoch: &metapb.RegionEpoch{Version: InitEpochVer, ConfVer: InitEpochConfVer},
-	}
-	return newRegion
+	return nil
 }
 
 // processConfChange 处理配置变更日志
