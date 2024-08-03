@@ -330,6 +330,16 @@ func (r *Raft) leaderTick() {
 		// MessageType_MsgBeat 属于内部消息，不需要经过 RawNode 处理
 		r.Step(pb.Message{From: r.id, To: r.id, MsgType: pb.MessageType_MsgBeat})
 	}
+	//TODO 选举超时 判断心跳回应数量
+
+	//TODO 3A 禅让机制
+	if r.leadTransferee != None {
+		// 在选举超时后领导权禅让仍然未完成，则 leader 应该终止领导权禅让，这样可以恢复客户端请求
+		r.transferElapsed++
+		if r.transferElapsed >= r.electionTimeout {
+			r.leadTransferee = None
+		}
+	}
 }
 
 func (r *Raft) candidateTick() {
@@ -393,6 +403,12 @@ func (r *Raft) becomeLeader() {
 		r.Prs[id].Next = r.RaftLog.LastIndex() + 1 // 初始化为 leader 的最后一条日志索引（后续出现冲突会往前移动）
 		r.Prs[id].Match = 0                        // 初始化为 0 就可以了
 	}
+	//3A
+	r.PendingConfIndex = r.initPendingConfIndex()
+	// 成为 Leader 之后立马在日志中追加一条 noop 日志，这是因为
+	// 在 Raft 论文中提交 Leader 永远不会通过计算副本的方式提交一个之前任期、并且已经被复制到大多数节点的日志
+	// 通过追加一条当前任期的 noop 日志，可以快速的提交之前任期内所有被复制到大多数节点的日志
+	r.Step(pb.Message{MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -584,6 +600,33 @@ func (r *Raft) leaderStep(m pb.Message) {
 	}
 }
 
+// addNode add a new node to raft group
+func (r *Raft) addNode(id uint64) {
+	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; !ok {
+		r.Prs[id] = &Progress{Next: r.RaftLog.LastIndex() + 1}
+		r.PendingConfIndex = None // 清除 PendingConfIndex 表示当前没有未完成的配置更新
+	}
+}
+
+// removeNode remove a node from raft group
+func (r *Raft) removeNode(id uint64) {
+	// Your Code Here (3A).
+	if _, ok := r.Prs[id]; ok {
+		delete(r.Prs, id)
+		// 如果是删除节点，由于有节点被移除了，这个时候可能有新的日志可以提交
+		// 这是必要的，因为 TinyKV 只有在 handleAppendRequestResponse 的时候才会判断是否有新的日志可以提交
+		// 如果节点被移除了，则可能会因为缺少这个节点的回复，导致可以提交的日志无法在当前任期被提交
+		if r.State == StateLeader && r.maybeCommit() {
+			log.Infof("[removeNode commit] %v leader commit new entry, commitIndex %v", r.id, r.RaftLog.committed)
+			r.broadcastAppendEntry() // 广播更新所有 follower 的 commitIndex
+		}
+	}
+	r.PendingConfIndex = None // 清除 PendingConfIndex 表示当前没有未完成的配置更新
+}
+
+/* ******************************** Msg Handle ******************************** */
+
 // 成为候选者，开始发起投票
 func (r *Raft) handleStartElection(m pb.Message) {
 	r.becomeCandidate()
@@ -750,6 +793,12 @@ func (r *Raft) handleAppendEntriesResponse(m pb.Message) {
 			r.broadcastAppendEntry()
 		}
 	}
+	//3A
+	if r.leadTransferee == m.From && r.Prs[m.From].Match == r.RaftLog.LastIndex() {
+		// AppendEntryResponse 回复来自 leadTransferee，检查日志是否是最新的
+		// 如果 leadTransferee 达到了最新的日志则立即发起领导权禅让
+		r.sendTimeoutNow(m.From)
+	}
 }
 
 // maybeUpdate 检查日志同步是不是一个过期的回复
@@ -909,6 +958,10 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 // handlePropose 追加从上层应用接收到的新日志，并广播给 follower
 func (r *Raft) handlePropose(m pb.Message) {
 	r.appendEntry(m.Entries)
+	// leader 处于领导权禅让，停止接收新的请求
+	if r.leadTransferee != None {
+		return
+	}
 	r.Prs[r.id].Match = r.RaftLog.LastIndex()
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	if len(r.Prs) == 1 {
@@ -970,14 +1023,4 @@ func (r *Raft) handleTimeoutNowRequest(m pb.Message) {
 	if err := r.Step(pb.Message{MsgType: pb.MessageType_MsgHup}); err != nil {
 		log.Panic(err)
 	}
-}
-
-// addNode add a new node to raft group
-func (r *Raft) addNode(id uint64) {
-	// Your Code Here (3A).
-}
-
-// removeNode remove a node from raft group
-func (r *Raft) removeNode(id uint64) {
-	// Your Code Here (3A).
 }
