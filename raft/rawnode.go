@@ -97,7 +97,6 @@ func NewRawNode(config *Config) (*RawNode, error) {
 	rn := &RawNode{
 		Raft: newRaft(config), // 创建底层 Raft 节点
 	}
-
 	rn.prevHardSt, _, _ = config.Storage.InitialState()
 	rn.prevSoftSt = &SoftState{
 		Lead:      rn.Raft.Lead,
