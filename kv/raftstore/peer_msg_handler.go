@@ -15,7 +15,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/log"
-	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
@@ -139,12 +138,77 @@ func (d *peerMsgHandler) processAdminRequest(entry *pb.Entry, requests *raft_cmd
 			d.ScheduleCompactLog(adminReq.CompactLog.CompactIndex)
 			log.Infof("%d apply commit, entry %v, type %s, truncatedIndex %v", d.peer.PeerId(), entry.Index, adminReq.CmdType, adminReq.CompactLog.CompactIndex)
 		}
+	case raft_cmdpb.AdminCmdType_Split: // Region Split 请求处理
+		//TODO
+		// error: regionId 不匹配
+		if requests.Header.RegionId != d.regionId {
+			regionNotFound := &util.ErrRegionNotFound{RegionId: requests.Header.RegionId}
+			d.handleProposal(entry, ErrResp(regionNotFound))
+			return kvWB
+		}
+		// error: 过期的请求
+		if errEpochNotMatch, ok := util.CheckRegionEpoch(requests, d.Region(), true).(*util.ErrEpochNotMatch); ok {
+			d.handleProposal(entry, ErrResp(errEpochNotMatch))
+			return kvWB
+		}
+		// error: key 不在 oldRegion 中
+		if err := util.CheckKeyInRegion(adminReq.Split.SplitKey, d.Region()); err != nil {
+			d.handleProposal(entry, ErrResp(err))
+			return kvWB
+		}
+		// error: Split Region 的 peers 和当前 oldRegion 的 peers 数量不相等，不知道为什么会出现这种原因
+		if len(d.Region().Peers) != len(adminReq.Split.NewPeerIds) {
+			d.handleProposal(entry, ErrRespStaleCommand(d.Term()))
+			return kvWB
+		}
+		oldRegion, split := d.Region(), adminReq.Split
+		oldRegion.RegionEpoch.Version++
+		newRegion := d.createNewSplitRegion(split, oldRegion) // 创建新的 Region
+		// 修改 storeMeta 信息
+		storeMeta := d.ctx.storeMeta
+		storeMeta.Lock()
+		storeMeta.regionRanges.Delete(&regionItem{region: oldRegion})          // 删除 oldRegion 的数据范围
+		oldRegion.EndKey = split.SplitKey                                      // 修改 oldRegion 的 range
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: oldRegion}) // 更新 oldRegion 的 range
+		storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion}) // 创建 newRegion 的 range
+		storeMeta.regions[newRegion.Id] = newRegion                            // 设置 regions 映射
+		storeMeta.Unlock()
+		// 持久化 oldRegion 和 newRegion
+		meta.WriteRegionState(kvWB, oldRegion, rspb.PeerState_Normal)
+		meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
+		// 这几句有用吗？
+		d.SizeDiffHint = 0
+		d.ApproximateSize = new(uint64)
+		// 创建当前 store 上的 newRegion Peer，注册到 router，并启动
+		peer, err := createPeer(d.storeID(), d.ctx.cfg, d.ctx.schedulerTaskSender, d.ctx.engine, newRegion)
+		if err != nil {
+			log.Panic(err)
+		}
+		d.ctx.router.register(peer)
+		d.ctx.router.send(newRegion.Id, message.Msg{Type: message.MsgTypeStart})
+		// 处理回调函数
+		d.handleProposal(entry, &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{},
+			AdminResponse: &raft_cmdpb.AdminResponse{
+				CmdType: raft_cmdpb.AdminCmdType_Split,
+				Split:   &raft_cmdpb.SplitResponse{Regions: []*metapb.Region{newRegion, oldRegion}},
+			},
+		})
+		log.Infof("[AdminCmdType_Split Process] oldRegin %v, newRegion %v", oldRegion, newRegion)
+		// 发送 heartbeat 给其他节点
+		if d.IsLeader() {
+			d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
+			d.notifyHeartbeatScheduler(newRegion, peer)
+		}
 	}
 	return kvWB
 }
 
 // notifyHeartbeatScheduler 帮助 region 快速创建 peer
 func (d *peerMsgHandler) notifyHeartbeatScheduler(region *metapb.Region, peer *peer) {
+	clonedRegion := new(metapb.Region)
+	err := util.CloneMsg(region, clonedRegion)
+	if err != nil {
 		return
 	}
 	d.ctx.schedulerTaskSender <- &runner.SchedulerRegionHeartbeatTask{
