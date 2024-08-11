@@ -290,6 +290,15 @@ func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 		if epoch.ConfVer < oldEpoch.ConfVer || epoch.Version < oldEpoch.Version {
 			return errors.Errorf("region is stale")
 		}
+	} else {
+		// 2. 扫描所有重叠的 region
+		regions := c.ScanRegions(region.GetStartKey(), region.GetEndKey(), -1)
+		for _, r := range regions {
+			rEpoch := r.GetRegionEpoch()
+			if epoch.ConfVer < rEpoch.ConfVer || epoch.Version < rEpoch.Version {
+				return errors.Errorf("region is stale")
+			}
+		}
 	}
 	// region 是最新的，更新 region tree 和 store status
 	c.putRegion(region)

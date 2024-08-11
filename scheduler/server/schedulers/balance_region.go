@@ -143,5 +143,11 @@ func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operato
 	}
 	// 5. 判断两个 store 的 region size 差值是否小于 2*ApproximateSize，是的话放弃 region 移动
 	if fromStore.GetRegionSize()-toStore.GetRegionSize() < region.GetApproximateSize() {
-	return nil
+		return nil
+	}
+	// 6. 创建 CreateMovePeerOperator 操作并返回
+	newPeer, _ := cluster.AllocPeer(toStore.GetID())
+	desc := fmt.Sprintf("move-from-%d-to-%d", fromStore.GetID(), toStore.GetID())
+	op, _ := operator.CreateMovePeerOperator(desc, cluster, region, operator.OpBalance, fromStore.GetID(), toStore.GetID(), newPeer.GetId())
+	return op
 }
