@@ -19,10 +19,10 @@ var _ tinykvpb.TinyKvServer = new(Server)
 type Server struct {
 	storage storage.Storage
 
-	// (Used in 4B)
+	// (Used in 4A/4B)
 	Latches *latches.Latches
 
-	// coprocessor API handler, out of course scope
+	// coprocessor API handler, test_result of course scope
 	copHandler *coprocessor.CopHandler
 }
 
@@ -48,6 +48,8 @@ func (server *Server) Snapshot(stream tinykvpb.TinyKv_SnapshotServer) error {
 }
 
 // Transactional API.
+
+// KvGet 只需要判断一下锁的状态，锁存在并且时间戳小于 txn.StartTS 就等待锁释放，返回给客户端
 func (server *Server) KvGet(_ context.Context, req *kvrpcpb.GetRequest) (*kvrpcpb.GetResponse, error) {
 	// Your Code Here (4B).
 	return nil, nil
