@@ -62,8 +62,8 @@ func (txn *MvccTxn) GetLock(key []byte) (*Lock, error) {
 		return nil, err
 	}
 	if value == nil {
-	return nil, nil
-}
+		return nil, nil
+	}
 	lock, err := ParseLock(value) // 反序列化 Lock 结构体
 	if err != nil {
 		return nil, err
@@ -203,8 +203,8 @@ func (txn *MvccTxn) MostRecentWrite(key []byte) (*Write, uint64, error) {
 	}
 	userKey := DecodeUserKey(iter.Item().KeyCopy(nil))
 	if !bytes.Equal(userKey, key) {
-	return nil, 0, nil
-}
+		return nil, 0, nil
+	}
 	value, err := iter.Item().ValueCopy(nil)
 	if err != nil {
 		return nil, 0, err
